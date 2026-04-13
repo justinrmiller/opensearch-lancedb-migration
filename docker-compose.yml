@@ -1,0 +1,19 @@
+services:
+  opensearch:
+    image: docker.io/opensearchproject/opensearch:3.6.0
+    container_name: opensearch-demo
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms16g -Xmx16g"
+    deploy:
+      resources:
+        limits:
+          memory: 32g
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+
+volumes:
+  opensearch-data:
