@@ -11,8 +11,8 @@ DigitalOcean Spaces quick-start:
   export AWS_SECRET_ACCESS_KEY=<spaces-secret>
   uv run python -m src.cli lancedb \\
     --storage-uri s3://my-space/coco \\
-    --endpoint-url https://nyc3.digitaloceanspaces.com \\
-    --region nyc3
+    --endpoint-url https://sfo3.digitaloceanspaces.com \\
+    --region sfo3
 """
 
 import math
@@ -210,14 +210,14 @@ def main(
         envvar="AWS_ENDPOINT_URL",
         help=(
             "Custom S3-compatible endpoint URL. "
-            "For DigitalOcean Spaces use e.g. https://nyc3.digitaloceanspaces.com"
+            "For DigitalOcean Spaces use e.g. https://sfo3.digitaloceanspaces.com"
         ),
     ),
     region: str = typer.Option(
         "us-east-1",
         "--region",
         envvar="AWS_DEFAULT_REGION",
-        help="Storage region (e.g. nyc3 for DigitalOcean Spaces, us-east-1 for AWS).",
+        help="Storage region (e.g. sfo3 for DigitalOcean Spaces, us-east-1 for AWS).",
     ),
     access_key_id: Optional[str] = typer.Option(
         None,
@@ -245,13 +245,13 @@ def main(
       # AWS S3
       uv run python -m src.cli lancedb --storage-uri s3://my-bucket/coco
 
-      # DigitalOcean Spaces (nyc3 datacenter)
+      # DigitalOcean Spaces (sfo3 datacenter)
       export AWS_ACCESS_KEY_ID=<key>
       export AWS_SECRET_ACCESS_KEY=<secret>
       uv run python -m src.cli lancedb \\
         --storage-uri s3://my-space/coco \\
-        --endpoint-url https://nyc3.digitaloceanspaces.com \\
-        --region nyc3
+        --endpoint-url https://sfo3.digitaloceanspaces.com \\
+        --region sfo3
     """
     overall_start = time.time()
 

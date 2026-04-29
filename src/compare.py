@@ -192,7 +192,7 @@ def main(
         None,
         "--endpoint-url",
         envvar="AWS_ENDPOINT_URL",
-        help="Custom S3-compatible endpoint URL (e.g. https://nyc3.digitaloceanspaces.com).",
+        help="Custom S3-compatible endpoint URL (e.g. https://sfo3.digitaloceanspaces.com).",
     ),
     region: str = typer.Option(
         "us-east-1",
@@ -216,8 +216,8 @@ def main(
 
       uv run python -m src.cli compare \\
         --lancedb-uri s3://my-space/coco \\
-        --endpoint-url https://nyc3.digitaloceanspaces.com \\
-        --region nyc3
+        --endpoint-url https://sfo3.digitaloceanspaces.com \\
+        --region sfo3
     """
     is_remote = bool(lancedb_uri and (
         lancedb_uri.startswith("s3://") or

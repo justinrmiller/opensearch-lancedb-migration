@@ -132,8 +132,8 @@ export AWS_ACCESS_KEY_ID=<spaces-key>
 export AWS_SECRET_ACCESS_KEY=<spaces-secret>
 uv run python -m src.cli lancedb \
   --storage-uri s3://my-space/coco \
-  --endpoint-url https://nyc3.digitaloceanspaces.com \
-  --region nyc3
+  --endpoint-url https://sfo3.digitaloceanspaces.com \
+  --region sfo3
 ```
 
 ### 7. Compare them side by side
@@ -145,8 +145,8 @@ uv run python -m src.cli compare
 # Remote LanceDB on DigitalOcean Spaces (production-realistic numbers)
 uv run python -m src.cli compare \
   --lancedb-uri s3://my-space/coco \
-  --endpoint-url https://nyc3.digitaloceanspaces.com \
-  --region nyc3
+  --endpoint-url https://sfo3.digitaloceanspaces.com \
+  --region sfo3
 
 # More measurement runs for tighter p95/p99 estimates
 uv run python -m src.cli compare --runs 100
