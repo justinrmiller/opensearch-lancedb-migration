@@ -8,7 +8,7 @@ from src.load_opensearch import main as opensearch_main
 from src.load_lancedb import main as lancedb_main
 from src.migrate_opensearch_to_lancedb import main as migrate_main
 from src.compare import main as compare_main
-from src.cost_estimate import main as cost_main
+from src.cost_estimate import cost_server, cost_direct
 from src.upload_huggingface import main as upload_main
 
 app = typer.Typer(
@@ -23,7 +23,8 @@ app.command(name="opensearch", help="Load embeddings into OpenSearch.")(opensear
 app.command(name="lancedb", help="Load embeddings into LanceDB (local disk or S3/DigitalOcean Spaces).")(lancedb_main)
 app.command(name="migrate", help="Migrate from OpenSearch to LanceDB.")(migrate_main)
 app.command(name="compare", help="Side-by-side comparison of both systems.")(compare_main)
-app.command(name="cost", help="Estimate hourly AWS cost for OpenSearch vs LanceDB.")(cost_main)
+app.command(name="cost", help="Cost estimate: both systems on dedicated servers.")(cost_server)
+app.command(name="cost-direct", help="Cost estimate: OpenSearch server vs LanceDB queried direct from S3/Spaces.")(cost_direct)
 app.command(name="upload", help="Upload LanceDB table to Hugging Face.")(upload_main)
 
 
