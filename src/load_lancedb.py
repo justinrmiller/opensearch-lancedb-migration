@@ -3,13 +3,23 @@
 Demonstrates the LanceDB approach:
 - Vectors are stored alongside metadata in a single Lance table
 - Images are stored DIRECTLY in the table as binary blobs
-- No external infrastructure required — it's just files on disk
-- The data, vectors, and images all live together
+- Works with local disk (default) or S3-compatible object stores
+  (AWS S3, DigitalOcean Spaces, MinIO, etc.)
+
+DigitalOcean Spaces quick-start:
+  export AWS_ACCESS_KEY_ID=<spaces-key>
+  export AWS_SECRET_ACCESS_KEY=<spaces-secret>
+  uv run python -m src.cli lancedb \\
+    --storage-uri s3://my-space/coco \\
+    --endpoint-url https://nyc3.digitaloceanspaces.com \\
+    --region nyc3
 """
 
 import math
+import os
 import time
 from pathlib import Path
+from typing import Optional
 
 import lancedb
 import pyarrow.parquet as pq
@@ -24,19 +34,53 @@ TABLE_NAME = "coco_clip_embeddings"
 
 app = typer.Typer()
 
-
 BATCH_SIZE = 4096
 
 
-def create_table(parquet_path: Path):
-    """Create a LanceDB table by streaming batches from a parquet file.
+def _build_storage_options(
+    endpoint_url: Optional[str],
+    region: str,
+    access_key_id: Optional[str],
+    secret_access_key: Optional[str],
+) -> dict:
+    """Build the storage_options dict passed to lancedb.connect() for S3-compatible stores."""
+    opts: dict = {}
+    if endpoint_url:
+        opts["endpoint"] = endpoint_url
+    if access_key_id:
+        opts["aws_access_key_id"] = access_key_id
+    if secret_access_key:
+        opts["aws_secret_access_key"] = secret_access_key
+    if region:
+        opts["aws_region"] = region
+    return opts
 
-    Reads the parquet in fixed-size record batches so memory usage stays
-    roughly constant regardless of dataset size.
-    """
-    db = lancedb.connect(str(LANCEDB_DIR))
 
-    # Drop existing table if present
+def connect_lancedb(
+    storage_uri: Optional[str],
+    endpoint_url: Optional[str],
+    region: str,
+    access_key_id: Optional[str],
+    secret_access_key: Optional[str],
+):
+    """Connect to LanceDB at the given URI (local path or s3://)."""
+    uri = storage_uri or str(LANCEDB_DIR)
+    is_remote = uri.startswith("s3://") or uri.startswith("gs://") or uri.startswith("az://")
+
+    if is_remote:
+        opts = _build_storage_options(endpoint_url, region, access_key_id, secret_access_key)
+        typer.echo(f"Connecting to LanceDB at {uri}")
+        if endpoint_url:
+            typer.echo(f"  Endpoint: {endpoint_url}  Region: {region}")
+        return lancedb.connect(uri, storage_options=opts if opts else None), uri, True
+
+    Path(uri).mkdir(parents=True, exist_ok=True)
+    typer.echo(f"Connecting to LanceDB at {uri}  (local disk)")
+    return lancedb.connect(uri), uri, False
+
+
+def create_table(db, parquet_path: Path, is_remote: bool):
+    """Stream parquet into a LanceDB table in fixed-size batches."""
     try:
         db.drop_table(TABLE_NAME)
         typer.secho(f"Dropped existing table '{TABLE_NAME}'", fg=typer.colors.YELLOW)
@@ -63,7 +107,22 @@ def create_table(parquet_path: Path):
             pbar.update(len(batch_df))
 
     elapsed = time.time() - start
-    typer.secho(f"Inserted {total_rows:,} records in {elapsed:.1f}s", fg=typer.colors.GREEN)
+    rows_per_sec = total_rows / elapsed if elapsed > 0 else 0
+    backend = "object store (remote)" if is_remote else "local disk"
+    typer.secho(
+        f"Inserted {total_rows:,} records in {elapsed:.1f}s  ({rows_per_sec:,.0f} rows/s)  [{backend}]",
+        fg=typer.colors.GREEN,
+    )
+    if is_remote:
+        typer.echo(
+            "  ^ Remote write rate is bounded by object-store PUT latency.\n"
+            "  Local disk ingestion is typically 3-10× faster."
+        )
+    else:
+        typer.echo(
+            "  ^ Local disk ingestion. S3-backed LanceDB will be slower for writes\n"
+            "    due to object-store PUT latency."
+        )
 
     return table, total_rows
 
@@ -110,7 +169,6 @@ def demo_search(table):
     """Run a sample vector search using the first row as the query."""
     typer.secho("\n--- Sample Vector Search (query: first image embedding) ---", bold=True)
 
-    # Grab a single vector from the table to use as a query
     sample = table.head(1).to_pandas()
     query_vec = sample.iloc[0]["vector"]
 
@@ -137,8 +195,64 @@ def demo_search(table):
 
 
 @app.command()
-def main():
-    """Load CLIP embeddings and images into a LanceDB table."""
+def main(
+    storage_uri: Optional[str] = typer.Option(
+        None,
+        "--storage-uri",
+        help=(
+            "LanceDB storage URI. Defaults to local data/lancedb. "
+            "Use 's3://bucket/path' for S3 or DigitalOcean Spaces."
+        ),
+    ),
+    endpoint_url: Optional[str] = typer.Option(
+        None,
+        "--endpoint-url",
+        envvar="AWS_ENDPOINT_URL",
+        help=(
+            "Custom S3-compatible endpoint URL. "
+            "For DigitalOcean Spaces use e.g. https://nyc3.digitaloceanspaces.com"
+        ),
+    ),
+    region: str = typer.Option(
+        "us-east-1",
+        "--region",
+        envvar="AWS_DEFAULT_REGION",
+        help="Storage region (e.g. nyc3 for DigitalOcean Spaces, us-east-1 for AWS).",
+    ),
+    access_key_id: Optional[str] = typer.Option(
+        None,
+        "--access-key-id",
+        envvar="AWS_ACCESS_KEY_ID",
+        help="S3 / Spaces access key ID. Defaults to AWS_ACCESS_KEY_ID env var.",
+    ),
+    secret_access_key: Optional[str] = typer.Option(
+        None,
+        "--secret-access-key",
+        envvar="AWS_SECRET_ACCESS_KEY",
+        help="S3 / Spaces secret access key. Defaults to AWS_SECRET_ACCESS_KEY env var.",
+    ),
+):
+    """Load CLIP embeddings and images into a LanceDB table.
+
+    Supports local disk (default) and S3-compatible object stores including
+    AWS S3 and DigitalOcean Spaces.
+
+    Examples:
+
+      # Local disk (default)
+      uv run python -m src.cli lancedb
+
+      # AWS S3
+      uv run python -m src.cli lancedb --storage-uri s3://my-bucket/coco
+
+      # DigitalOcean Spaces (nyc3 datacenter)
+      export AWS_ACCESS_KEY_ID=<key>
+      export AWS_SECRET_ACCESS_KEY=<secret>
+      uv run python -m src.cli lancedb \\
+        --storage-uri s3://my-space/coco \\
+        --endpoint-url https://nyc3.digitaloceanspaces.com \\
+        --region nyc3
+    """
     overall_start = time.time()
 
     parquet_path = EMBEDDINGS_DIR / "image_embeddings.parquet"
@@ -146,13 +260,15 @@ def main():
         typer.secho(f"Embeddings not found: {parquet_path}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
 
-    # Read vector dimension from parquet schema without loading data
     pf = pq.ParquetFile(parquet_path)
     typer.echo(f"Found {pf.metadata.num_rows:,} rows in {parquet_path.name}")
 
-    table, total_rows = create_table(parquet_path)
+    db, resolved_uri, is_remote = connect_lancedb(
+        storage_uri, endpoint_url, region, access_key_id, secret_access_key
+    )
 
-    # Get vector dim from the first row
+    table, total_rows = create_table(db, parquet_path, is_remote)
+
     sample = table.head(1).to_pandas()
     vector_dim = len(sample.iloc[0]["vector"])
     create_hnsw_index(table, num_rows=total_rows, vector_dim=vector_dim)
@@ -162,9 +278,9 @@ def main():
     row_count = table.count_rows()
     typer.secho(f"\nLanceDB table '{TABLE_NAME}' has {row_count:,} rows.", fg=typer.colors.GREEN, bold=True)
 
-    # Show storage comparison
-    lance_size = sum(f.stat().st_size for f in Path(LANCEDB_DIR).rglob("*") if f.is_file())
-    typer.echo(f"LanceDB total size on disk: {lance_size / 1024 / 1024:.1f} MB (includes images + vectors + metadata)")
+    if not is_remote:
+        lance_size = sum(f.stat().st_size for f in Path(resolved_uri).rglob("*") if f.is_file())
+        typer.echo(f"LanceDB total size on disk: {lance_size / 1024 / 1024:.1f} MB (includes images + vectors + metadata)")
 
     overall_elapsed = time.time() - overall_start
     typer.secho(f"Total time: {overall_elapsed:.1f}s", fg=typer.colors.GREEN, bold=True)

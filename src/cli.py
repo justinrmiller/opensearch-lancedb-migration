@@ -20,7 +20,7 @@ app = typer.Typer(
 app.command(name="download", help="Download COCO 2017 images and captions.")(download_main)
 app.command(name="embed", help="Generate SigLIP 2 image embeddings.")(embeddings_main)
 app.command(name="opensearch", help="Load embeddings into OpenSearch.")(opensearch_main)
-app.command(name="lancedb", help="Load embeddings into LanceDB with inline images.")(lancedb_main)
+app.command(name="lancedb", help="Load embeddings into LanceDB (local disk or S3/DigitalOcean Spaces).")(lancedb_main)
 app.command(name="migrate", help="Migrate from OpenSearch to LanceDB.")(migrate_main)
 app.command(name="compare", help="Side-by-side comparison of both systems.")(compare_main)
 app.command(name="cost", help="Estimate hourly AWS cost for OpenSearch vs LanceDB.")(cost_main)
