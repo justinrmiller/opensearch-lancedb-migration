@@ -107,7 +107,15 @@ def bulk_index(client: OpenSearch, df: pd.DataFrame):
     success, errors = helpers.bulk(client, generate_actions(), chunk_size=500, request_timeout=120)
 
     elapsed = time.time() - start
-    typer.secho(f"Indexed {success} documents in {elapsed:.1f}s", fg=typer.colors.GREEN)
+    rows_per_sec = success / elapsed if elapsed > 0 else 0
+    typer.secho(
+        f"Indexed {success:,} documents in {elapsed:.1f}s  ({rows_per_sec:,.0f} rows/s)",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(
+        "  ^ Ingestion rate includes HTTP serialization, REST parsing, and JVM\n"
+        "    overhead from the containerized OpenSearch service."
+    )
     if errors:
         typer.secho(f"Errors: {len(errors)}", fg=typer.colors.RED)
 

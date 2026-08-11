@@ -4,6 +4,25 @@ A hands-on project comparing **OpenSearch** and **LanceDB** for vector search us
 
 **Key takeaway:** LanceDB stores images *inline* with vectors and metadata — no S3, no CDN, no external file server. OpenSearch only stores references.
 
+## Benchmark Context
+
+> **These benchmarks compare two different deployment models, not just two implementations.**
+>
+> | | OpenSearch | LanceDB (this repo) |
+> |---|---|---|
+> | **Deployment** | Client/server: Docker container, JVM, HTTP REST API | Embedded: in-process library, local disk |
+> | **Ingestion path** | HTTP → REST parsing → JVM → Lucene segment write | In-process → direct disk write |
+> | **Query path** | TCP socket → JSON parse → JVM heap search | In-process memory-mapped file read |
+>
+> The ingestion and query latency numbers produced by this repo reflect those architectural
+> differences, not just algorithmic ones. A LanceDB instance backed by **S3** (the realistic
+> production deployment for cost savings) will have higher write latency than the local-disk
+> numbers here. Query latency on S3 depends heavily on index cache warmth; sub-100 ms is
+> achievable on warm cache but cold-start reads will be slower.
+>
+> The **cost estimates** (`uv run python -m src.cli cost`) model the S3 deployment explicitly
+> and do not depend on the ingestion benchmark numbers.
+
 ## Architecture
 
 ```
@@ -102,13 +121,35 @@ uv run python -m src.cli opensearch
 ### 6. Load into LanceDB
 
 ```bash
+# Local disk (default)
 uv run python -m src.cli lancedb
+
+# AWS S3
+uv run python -m src.cli lancedb --storage-uri s3://my-bucket/coco
+
+# DigitalOcean Spaces
+export AWS_ACCESS_KEY_ID=<spaces-key>
+export AWS_SECRET_ACCESS_KEY=<spaces-secret>
+uv run python -m src.cli lancedb \
+  --storage-uri s3://my-space/coco \
+  --endpoint-url https://sfo3.digitaloceanspaces.com \
+  --region sfo3
 ```
 
 ### 7. Compare them side by side
 
 ```bash
+# Local LanceDB (embedded, fast baseline)
 uv run python -m src.cli compare
+
+# Remote LanceDB on DigitalOcean Spaces (production-realistic numbers)
+uv run python -m src.cli compare \
+  --lancedb-uri s3://my-space/coco \
+  --endpoint-url https://sfo3.digitaloceanspaces.com \
+  --region sfo3
+
+# More measurement runs for tighter p95/p99 estimates
+uv run python -m src.cli compare --runs 100
 ```
 
 ### 8. Run the migration

@@ -1,14 +1,22 @@
 """Side-by-side comparison of OpenSearch and LanceDB for vector search.
 
 Runs the same queries against both systems and compares:
-- Query latency
+- Query latency (p50/p95/p99 over --runs repeated measurements)
 - Result quality (overlap in top-k)
 - Storage model (references vs inline data)
 - Operational complexity
+
+DEPLOYMENT NOTE: This benchmark compares two fundamentally different deployment
+models. OpenSearch runs as a separate service (Docker container, JVM, HTTP REST
+API over localhost). LanceDB runs embedded in-process with data on local disk.
+A remote LanceDB instance writing to S3 would show materially different ingestion
+and query latency. See the README for context on what these numbers do and don't
+tell you.
 """
 
 import time
 from pathlib import Path
+from typing import Optional
 
 import lancedb
 import numpy as np
@@ -18,9 +26,14 @@ import typer
 from opensearchpy import OpenSearch
 from transformers import AutoModel, AutoProcessor
 
+from src.load_lancedb import connect_lancedb
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 EMBEDDINGS_DIR = DATA_DIR / "embeddings"
 LANCEDB_DIR = DATA_DIR / "lancedb"
+
+DEFAULT_RUNS = 30
+DEFAULT_WARMUP = 5
 
 app = typer.Typer()
 
@@ -34,8 +47,14 @@ def get_opensearch():
     )
 
 
-def get_lancedb():
-    db = lancedb.connect(str(LANCEDB_DIR))
+def get_lancedb_table(
+    storage_uri: Optional[str] = None,
+    endpoint_url: Optional[str] = None,
+    region: str = "us-east-1",
+    access_key_id: Optional[str] = None,
+    secret_access_key: Optional[str] = None,
+):
+    db, _, _ = connect_lancedb(storage_uri, endpoint_url, region, access_key_id, secret_access_key)
     return db.open_table("coco_clip_embeddings")
 
 
@@ -72,10 +91,51 @@ def text_to_vector(query: str) -> list[float]:
     return features[0].numpy().tolist()
 
 
-def compare_query(os_client, lance_table, query_vector: list[float], query_label: str, k: int = 5):
-    """Run the same query against both systems and compare."""
-    os_time, os_hits = search_opensearch(os_client, query_vector, k)
-    lance_time, lance_results = search_lancedb(lance_table, query_vector, k)
+def _latency_stats(times_s: list[float]) -> dict:
+    arr = np.array(times_s) * 1000  # convert to ms
+    return {
+        "mean": float(np.mean(arr)),
+        "p50":  float(np.percentile(arr, 50)),
+        "p95":  float(np.percentile(arr, 95)),
+        "p99":  float(np.percentile(arr, 99)),
+        "max":  float(np.max(arr)),
+        "n":    len(arr),
+    }
+
+
+def compare_query(
+    os_client,
+    lance_table,
+    query_vector: list[float],
+    query_label: str,
+    k: int = 5,
+    runs: int = DEFAULT_RUNS,
+    warmup: int = DEFAULT_WARMUP,
+):
+    """Run the same query against both systems repeatedly and report latency stats."""
+
+    # Warmup — results discarded
+    for _ in range(warmup):
+        search_opensearch(os_client, query_vector, k)
+        search_lancedb(lance_table, query_vector, k)
+
+    os_all: list[float] = []
+    lance_all: list[float] = []
+
+    # Capture result sets from first measurement run for display
+    os_time_0, os_hits = search_opensearch(os_client, query_vector, k)
+    lance_time_0, lance_results = search_lancedb(lance_table, query_vector, k)
+    os_all.append(os_time_0)
+    lance_all.append(lance_time_0)
+
+    for _ in range(runs - 1):
+        ot, _ = search_opensearch(os_client, query_vector, k)
+        lt, _ = search_lancedb(lance_table, query_vector, k)
+        os_all.append(ot)
+        lance_all.append(lt)
+
+    os_stats = _latency_stats(os_all)
+    lance_stats = _latency_stats(lance_all)
 
     typer.secho(f"\nQuery: {query_label}", bold=True)
     typer.echo(f"{'Rank':<6} {'OpenSearch':<60} {'LanceDB':<60}")
@@ -85,7 +145,6 @@ def compare_query(os_client, lance_table, query_vector: list[float], query_label
     lance_ids = []
 
     for i in range(k):
-        # OpenSearch result
         if i < len(os_hits):
             src = os_hits[i]["_source"]
             os_ids.append(src["image_id"])
@@ -93,7 +152,6 @@ def compare_query(os_client, lance_table, query_vector: list[float], query_label
         else:
             os_col = "-"
 
-        # LanceDB result
         if i < len(lance_results):
             row = lance_results.iloc[i]
             lance_ids.append(row["image_id"])
@@ -104,40 +162,105 @@ def compare_query(os_client, lance_table, query_vector: list[float], query_label
 
         typer.echo(f"{i + 1:<6} {os_col:<60} {lance_col:<60}")
 
-    # Overlap
     overlap = set(os_ids) & set(lance_ids)
     typer.echo(f"  Top-{k} overlap: {len(overlap)}/{k} matching image IDs")
-    typer.echo(f"  Latency: OpenSearch {os_time*1000:.1f}ms | LanceDB {lance_time*1000:.1f}ms")
+    typer.echo(
+        f"  Latency ({runs} runs, {warmup} warmup) — "
+        f"OpenSearch: mean={os_stats['mean']:.1f}ms  p50={os_stats['p50']:.1f}ms  "
+        f"p95={os_stats['p95']:.1f}ms  p99={os_stats['p99']:.1f}ms | "
+        f"LanceDB: mean={lance_stats['mean']:.1f}ms  p50={lance_stats['p50']:.1f}ms  "
+        f"p95={lance_stats['p95']:.1f}ms  p99={lance_stats['p99']:.1f}ms"
+    )
 
-    return os_time, lance_time
+    return os_stats, lance_stats
 
 
 @app.command()
-def main():
-    """Run the same queries against OpenSearch and LanceDB, comparing results."""
-    typer.secho("=" * 60, bold=True)
+def main(
+    runs: int = typer.Option(DEFAULT_RUNS, help="Number of timed query repetitions per query."),
+    warmup: int = typer.Option(DEFAULT_WARMUP, help="Warmup iterations before timing starts."),
+    k: int = typer.Option(5, help="Number of results to retrieve per query."),
+    lancedb_uri: Optional[str] = typer.Option(
+        None,
+        "--lancedb-uri",
+        help=(
+            "LanceDB storage URI. Defaults to local data/lancedb. "
+            "Use 's3://bucket/path' to benchmark against S3 or DigitalOcean Spaces."
+        ),
+    ),
+    endpoint_url: Optional[str] = typer.Option(
+        None,
+        "--endpoint-url",
+        envvar="AWS_ENDPOINT_URL",
+        help="Custom S3-compatible endpoint URL (e.g. https://sfo3.digitaloceanspaces.com).",
+    ),
+    region: str = typer.Option(
+        "us-east-1",
+        "--region",
+        envvar="AWS_DEFAULT_REGION",
+        help="Storage region.",
+    ),
+    access_key_id: Optional[str] = typer.Option(
+        None, "--access-key-id", envvar="AWS_ACCESS_KEY_ID",
+        help="S3 / Spaces access key ID.",
+    ),
+    secret_access_key: Optional[str] = typer.Option(
+        None, "--secret-access-key", envvar="AWS_SECRET_ACCESS_KEY",
+        help="S3 / Spaces secret access key.",
+    ),
+):
+    """Run the same queries against OpenSearch and LanceDB, comparing results.
+
+    By default, LanceDB reads from local disk. To benchmark against a remote
+    object store (S3, DigitalOcean Spaces) pass --lancedb-uri:
+
+      uv run python -m src.cli compare \\
+        --lancedb-uri s3://my-space/coco \\
+        --endpoint-url https://sfo3.digitaloceanspaces.com \\
+        --region sfo3
+    """
+    is_remote = bool(lancedb_uri and (
+        lancedb_uri.startswith("s3://") or
+        lancedb_uri.startswith("gs://") or
+        lancedb_uri.startswith("az://")
+    ))
+    lance_backend_label = f"remote ({lancedb_uri})" if is_remote else "embedded, local disk"
+
+    typer.secho("=" * 70, bold=True)
     typer.secho("OpenSearch vs LanceDB — Side-by-Side Comparison", bold=True)
     typer.secho("Same CLIP embeddings, same queries, different storage models.", dim=True)
-    typer.secho("=" * 60, bold=True)
+    typer.secho("=" * 70, bold=True)
+
+    # Surface the deployment asymmetry prominently so readers aren't misled.
+    typer.secho("\n*** DEPLOYMENT CONTEXT ***", fg=typer.colors.YELLOW, bold=True)
+    typer.echo(
+        f"  OpenSearch: client/server  — Docker container, JVM, HTTP REST API (localhost)\n"
+        f"  LanceDB:    {lance_backend_label}\n"
+        "\n"
+        "  These are different deployment models, not just different implementations.\n"
+        "  LanceDB backed by a remote object store will show higher latency than an\n"
+        "  embedded local-disk deployment. The cost section models S3 separately.\n"
+    )
+    typer.secho("=" * 70, bold=True)
 
     os_client = get_opensearch()
-    lance_table = get_lancedb()
+    lance_table = get_lancedb_table(lancedb_uri, endpoint_url, region, access_key_id, secret_access_key)
 
-    # Load precomputed embeddings from parquet
     df = pd.read_parquet(EMBEDDINGS_DIR / "image_embeddings.parquet")
 
-    os_times = []
-    lance_times = []
+    all_os_stats: list[dict] = []
+    all_lance_stats: list[dict] = []
 
-    # Query 1: Image similarity (use a sample image embedding)
+    # Query 1: Image similarity
     typer.secho("\n1. Image -> Image Search", bold=True)
-    ot, lt = compare_query(
+    os_s, lt_s = compare_query(
         os_client, lance_table,
         df.iloc[42]["vector"],
         f"Similar to '{df.iloc[42]['file_name']}'",
+        k=k, runs=runs, warmup=warmup,
     )
-    os_times.append(ot)
-    lance_times.append(lt)
+    all_os_stats.append(os_s)
+    all_lance_stats.append(lt_s)
 
     # Query 2: Text -> Image search (cross-modal)
     typer.secho("\n2. Text -> Image Search (cross-modal)", bold=True)
@@ -149,28 +272,41 @@ def main():
 
     for query in text_queries:
         vec = text_to_vector(query)
-        ot, lt = compare_query(os_client, lance_table, vec, query)
-        os_times.append(ot)
-        lance_times.append(lt)
+        os_s, lt_s = compare_query(os_client, lance_table, vec, query, k=k, runs=runs, warmup=warmup)
+        all_os_stats.append(os_s)
+        all_lance_stats.append(lt_s)
 
-    # Summary
+    # Aggregate across all queries
+    os_p50s = [s["p50"] for s in all_os_stats]
+    os_p95s = [s["p95"] for s in all_os_stats]
+    lt_p50s = [s["p50"] for s in all_lance_stats]
+    lt_p95s = [s["p95"] for s in all_lance_stats]
+
     typer.echo("")
-    typer.secho("=" * 60, bold=True)
+    typer.secho("=" * 70, bold=True)
     typer.secho("Performance Summary", bold=True)
-    typer.secho("=" * 60, bold=True)
-    typer.echo(f"\nAverage latency:")
-    typer.echo(f"  OpenSearch: {np.mean(os_times)*1000:.1f}ms")
-    typer.echo(f"  LanceDB:    {np.mean(lance_times)*1000:.1f}ms")
+    typer.secho("=" * 70, bold=True)
+    typer.echo(f"\nQuery latency across {len(all_os_stats)} query types ({runs} runs + {warmup} warmup each):")
+    typer.echo(f"  {'':25} {'mean p50':>10} {'mean p95':>10}")
+    typer.echo(f"  {'OpenSearch':25} {np.mean(os_p50s):>9.1f}ms {np.mean(os_p95s):>9.1f}ms")
+    lancedb_row_label = f"LanceDB ({lance_backend_label})"[:25]
+    typer.echo(f"  {lancedb_row_label:25} {np.mean(lt_p50s):>9.1f}ms {np.mean(lt_p95s):>9.1f}ms")
+
+    if not is_remote:
+        typer.echo(
+            "\n  Note: LanceDB numbers are for embedded local-disk. "
+            "Re-run with --lancedb-uri s3://... to benchmark the S3 deployment."
+        )
+
     typer.echo(f"\nStorage Model Comparison:")
-    typer.echo(f"  OpenSearch:")
-    typer.echo(f"    - Vectors + metadata in kNN index")
+    typer.echo(f"  OpenSearch  (client/server):")
+    typer.echo(f"    - Vectors + metadata in kNN index (JVM heap)")
     typer.echo(f"    - Images stored externally (S3, CDN, filesystem)")
     typer.echo(f"    - Requires Docker/server infrastructure")
-    typer.echo(f"    - Image retrieval = separate HTTP call")
-    typer.echo(f"  LanceDB:")
+    typer.echo(f"    - Image retrieval = separate HTTP call after search")
+    typer.echo(f"  LanceDB     ({lance_backend_label}):")
     typer.echo(f"    - Vectors + metadata + images in one Lance table")
-    typer.echo(f"    - No external storage needed")
-    typer.echo(f"    - No server — embedded, just files on disk")
+    typer.echo(f"    - No server — embedded, files on disk or object store")
     typer.echo(f"    - Image bytes returned with search results")
 
 
